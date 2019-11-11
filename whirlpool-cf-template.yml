@@ -1,0 +1,812 @@
+# 
+# Copyright (C) Rihan Pereira <rihen234@gmail.com>
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# 
+
+AWSTemplateFormatVersion: "2010-09-09"
+
+# ----------- define basic/AWS specific parameters for whirlpool stack ---------
+Parameters:
+  InstanceTypeParameters:
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+    Description: "choose among two choices available"
+
+  WhirlpoolVPCId:
+    Type: "AWS::EC2::VPC::Id"
+    Default: vpc-0c7a0ba5e8cad5b83
+    Description: "existing vpc id of whirlpool"
+
+  RDSMasterUsernameParam:
+    Type: String
+    Default: postgres
+    Description: "RDS master username"
+
+  RDSMasterPWDParam:
+    Type: String
+    Description: "RDS master password"
+
+  RDSWhirlpoolUserParam:
+    Type: String
+    Description: "RDS whirlpool user name"
+  
+  RDSWhirlpoolPWDParam:
+    Type: String
+    Description: "RDS whirlpool pwd"
+
+  RDSDBNameParam:
+    Type: String
+    Description: "postgres db name to initiate"
+
+  RDSEndpoint:
+    Type: String
+    Description: "postgres connection endpoint used by crawler nodes"
+
+  SSHKeyPair:
+    Type: "AWS::EC2::KeyPair::KeyName"
+    Default: whirlpool-jumbox
+    Description: "Amazon ec2 key pair to use"
+
+  UbuntuImageId:
+    Type: "AWS::EC2::Image::Id"
+    Default: ami-05c1fa8df71875112
+    Description: "image id for ubuntu images"
+
+  NATImageId:
+    Type: "AWS::EC2::Image::Id"
+    Default: ami-00d1f8201864cc10c
+    Description: "image id of NAT instance"
+
+# ---------- defines AWS resources for whirlpool project ---------------
+Resources:
+  # define internet gateway to attach to already existing VPC
+  whirlpoolIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: whirlpool-igw
+
+  # vpc internet gateway attachment resource
+  WhirlpoolGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: WhirlpoolVPCId
+      InternetGatewayId:
+        Ref: whirlpoolIGW
+    
+  # ------------- define 4 subnets within an existing VPC ----------------------
+  whirlpoolPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      CidrBlock: "10.0.0.0/28"
+      AvailabilityZone: "us-east-2a"
+      Tags:
+        - Key: Name
+          Value: whirlpool-public-sub-1
+
+  whirlpoolPrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      CidrBlock: "10.0.0.16/28"
+      AvailabilityZone: "us-east-2a"
+      Tags:
+        - Key: Name
+          Value: whirlpool-private-sub-2
+
+  whirlpoolPrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      CidrBlock: "10.0.0.32/28"
+      AvailabilityZone: "us-east-2b"
+      Tags:
+        - Key: Name
+          Value: whirlpool-private-sub-3
+
+  whirlpoolPrivateSubnet4:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      CidrBlock: "10.0.0.48/28"
+      AvailabilityZone: "us-east-2a"
+      Tags:
+        - Key: Name
+          Value: whirlpool-private-sub-4
+
+  # ------------define all security groups for whirlpool project----------------------
+  # ------------ whirlpool crawler sec grp for pvt sub 4 ----------------------
+  whirlpoolCrawlerSecGrpPvtSub4:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "outbounds internets, inbounds ssh only from bastion instance"
+      GroupName: "whirlpool-crawler-secgrp-pvtsub-4"
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      Tags:
+        - Key: Name
+          Value: whirlpool-crawler-secgrp-pvtsub-4
+
+  SSHFromBastionInboundRulePvtSub4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      Description: "only allow ssh to crawler nodes from bastion instance"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+
+  TunnelRMQtrafficInboundRulePvtSub4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      Description: "access rmq mangement console traffic from bastion node tunneled to client host"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+
+  TunnelPGAdmintrafficInboundRulePvtSub4:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 8083
+      ToPort: 8083
+      Description: "accept pgadmin traffic from bastion node tunneled to client host"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+
+  OutBoundRulePvtSub4:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+
+  # ------------ whirlpool mongo sec grp pvt sub 2 ----------------------
+  whirlpoolMongoSecGrpPvtSub2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "accept incoming mongo traffic on 27017 from crawlers, ssh from bastion"
+      GroupName: "whirlpool-mongodb-secgrp-pvtsub-2"
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      Tags:
+        - Key: Name
+          Value: whirlpool-mongodb-secgrp-pvtsub-2
+
+  SSHFromBastionInboundRulePvtSub2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      Description: "ssh only from bastion instance"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolMongoSecGrpPvtSub2
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+
+  MongoTrafficInboundRulePvtSub2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 27017
+      ToPort: 27017
+      Description: "mongo traffic from crawler nodes"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolMongoSecGrpPvtSub2
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+
+  TunnelEgressMongoInboundRulePvtSub2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 27017
+      ToPort: 27017
+      Description: "egress mongo traffic tunneled to client host"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolMongoSecGrpPvtSub2
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+  
+  OutBoundRulePvtSub2:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolMongoSecGrpPvtSub2
+          - GroupId
+
+  # ------------ whirlpool bastion sec grp for pub sub 1 ------------------
+  whirlpoolBastionNatSecGrpPubSub1:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "whirlpool bastion node in public subnet 1"
+      GroupName: "whirlpool-bastion-nat-sec-grp-pubsub-1"
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      Tags:
+        - Key: Name
+          Value: whirlpool-bastion-nat-sec-grp-pubsub-1
+
+  SSHInboundRulePubSub1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+      Description: "only from my workstation"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+
+  CrawlerNonSSLHttpInboundRulePubSub1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      Description: "crawler downloads non-ssl http traffic"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+      
+      
+  CrawlerSSLHttpInboundRulePubSub1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      Description: "crawler downloads ssl http traffic"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+
+  PullDockerMongoNonSSLHttpInboundRulePubSub1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      Description: "pull mongo docker container, ubuntu updates without ssl"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolMongoSecGrpPvtSub2
+          - GroupId
+
+  PullDockerMongoSSLHttpInboundRulePubSub1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      Description: "pull mongo docker container, ubuntu updates with ssl"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolMongoSecGrpPvtSub2
+          - GroupId
+
+  OutBoundRulePubSub1:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+      
+  # -------------whirlpool rds sec grp pvt sub 2 and 3 ----------------
+  whirlpoolRDSSecGrpPvtSub23:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "accept inbound postgres 5432 from crawler nodes only"
+      GroupName: "whirlpool-rds-secgrp-pvtsub-2-3"
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      Tags:
+        - Key: Name
+          Value: whirlpool-rds-secgrp-pvtsub-2-3
+
+  RDSTrafficToCrawlerInboundRulePvtSub23:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      Description: "accept sql request from crawlers"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolRDSSecGrpPvtSub23
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+
+  RDSTrafficToBastionInboundRulePvtSub23:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      Description: "egress rds tunneled to client host"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolRDSSecGrpPvtSub23
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+
+  OutBoundRulePvtSub23:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolRDSSecGrpPvtSub23
+          - GroupId
+
+  # ----------------whirlpool memcache sec grp pvt sub 2 -------------------
+  whirlpoolMemcacheSecGrpPvtSub2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "accept memcache traffic from crawlers only"
+      GroupName: "whirlpool-memcache-secgrp-pvtsub-2"
+      VpcId: "vpc-0c7a0ba5e8cad5b83"
+      Tags:
+        - Key: Name
+          Value: whirlpool-memcache-secgrp-pvtsub-2
+
+  MemcacheTrafficToCrawlerInboundRulePvtSub2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 11211
+      ToPort: 11211
+      Description: "allow memcache traffic from crawler nodes"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolMemcacheSecGrpPvtSub2
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolCrawlerSecGrpPvtSub4
+          - GroupId
+
+  MemcacheTrafficToBastionInboundRulePvtSub2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 11211
+      ToPort: 11211
+      Description: "egress cache traffic tunneled to client host"
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolMemcacheSecGrpPvtSub2
+          - GroupId
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+          - whirlpoolBastionNatSecGrpPubSub1
+          - GroupId
+
+  OutBoundRulePvtSub2:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      CidrIp: 0.0.0.0/0
+      GroupId:
+        Fn::GetAtt:
+          - whirlpoolMemcacheSecGrpPvtSub2
+          - GroupId
+
+  # ----- define RDS postgres instance -------------------
+  # 1. define RDS DB Subnet Group
+  RDSDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "subnet group for rds postgres instance"
+      DBSubnetGroupName: "whirlpool-postgres-rds-subgrp"
+      SubnetIds:
+        - !Ref whirlpoolPrivateSubnet2
+        - !Ref whirlpoolPrivateSubnet3
+      Tags:
+        -
+          Key: "Name"
+          Value: "whirlpool-postgres-rds-subgrp"
+
+  
+  WhirlpoolPostgresProd:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: "20"
+      AutoMinorVersionUpgrade: true
+      AvailabilityZone: "us-east-2a"
+      BackupRetentionPeriod: 5
+      CopyTagsToSnapshot: true
+      DBInstanceClass: "db.t2.micro"
+      DBInstanceIdentifier: "whirlpool-postgres-prod"
+      DBSubnetGroupName: !Ref RDSDBSubnetGroup
+      DeleteAutomatedBackups: true
+      DeletionProtection: false
+      EnablePerformanceInsights: true
+      Engine: "postgres"
+      EngineVersion: "11.4"
+      MasterUsername: !Ref RDSMasterUsernameParam
+      MasterUserPassword: !Ref RDSMasterPWDParam
+      DBName: !Ref RDSDBNameParam
+      MultiAZ: false
+      PerformanceInsightsRetentionPeriod: 7
+      Port: "5432"
+      PubliclyAccessible: false
+      StorageType: "gp2"
+      Tags: 
+        -
+          Key: Name
+          Value: "whirlpool postgres RDS instance used by contentseen and due"
+      UseDefaultProcessorFeatures: true
+      VPCSecurityGroups: 
+        - !Ref whirlpoolRDSSecGrpPvtSub23
+
+  # -----------define whirlpool memcache ---------------
+
+  WhirlpoolMemCacheSubgrp:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: "memcache subnet group for whirlpool memcache instance"
+      CacheSubnetGroupName: "whirlpool-memcache-subgrp"
+      SubnetIds:
+        - !Ref whirlpoolPrivateSubnet2
+
+  WhirlpoolCache:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      AZMode: "single-az"
+      CacheNodeType: "cache.t2.micro"
+      CacheSubnetGroupName: !Ref WhirlpoolMemCacheSubgrp
+      ClusterName: "whirlpool-cache"
+      Engine: "memcached"
+      EngineVersion: "1.5.10"
+      NumCacheNodes: 1
+      Port: 11211
+      PreferredAvailabilityZone: "us-east-2a"
+      Tags: 
+        -
+          Key: Name
+          Value: "whirlpool-cache"
+      VpcSecurityGroupIds: 
+        - !GetAtt whirlpoolMemcacheSecGrpPvtSub2.GroupId
+
+
+  # ----------- define mongodb ec2 instance in pvt sub 2 -------------
+  whirlpoolMongo:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      AvailabilityZone: "us-east-2a"
+      BlockDeviceMappings: 
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeType: "gp2"
+            DeleteOnTermination: "true"
+            VolumeSize: "15"
+          NoDevice: {}
+      ImageId: !Ref UbuntuImageId
+      InstanceInitiatedShutdownBehavior: "stop"
+      InstanceType: !Ref InstanceTypeParameters
+      KeyName: !Ref SSHKeyPair
+      Monitoring: false
+      PrivateIpAddress: "10.0.0.26"
+      SecurityGroupIds: 
+        - !GetAtt whirlpoolMongoSecGrpPvtSub2.GroupId
+      SourceDestCheck: true
+      SubnetId: !Ref whirlpoolPrivateSubnet2
+      Tags: 
+        - Key: Name
+          Value: whirlpool-mongodb
+        - Key: Capacity
+          Value: 15GiB
+        - Key: ec2-purpose
+          Value: mongodb storage
+        - Key: placement
+          Value: pvtsub2
+      Tenancy: "default"
+      UserData: !Base64 |
+        #cloud-config
+        repo_update: true
+
+        packages:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+
+        runcmd:
+          - [ sh, -c, "export APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1"]
+          - [ sh, -c, 'curl -fsSL "https://download.docker.com/linux/ubuntu/gpg" | apt-key add -' ]
+          - [ sh, -c, "apt-key fingerprint F273FCD8" ]
+          - [sh, -c, 'add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"' ]
+          - [ apt-get, update ]
+          - [ apt-get, install, -y, docker-ce ]
+          - [ sh, -c, "groupadd docker" ]
+          - [ sh, -c, "usermod -aG docker ubuntu" ]
+          - systemctl enable docker
+          - [ docker, volume, create, whirlpool-mongodbdata ]
+          - [ sh, -c, 'docker run --name whirlpool-mongodb -v "whirlpool-mongodbdata:/data/db" -p "27017:27017" -td "rihbyne/whirlpool-mongodb:latest"' ]
+
+        output: {all: '| tee -a /var/log/cloud-init-output.log'}
+
+  # ---------- define bastion NAT instance ------------------
+  whirlpoolBastionNode:
+    Type: "AWS::EC2::Instance"
+    DependsOn: WhirlpoolGatewayAttachment
+    Properties:
+      AvailabilityZone: "us-east-2a"
+      BlockDeviceMappings: 
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeType: "standard"
+            DeleteOnTermination: "false"
+            VolumeSize: "8"
+          # NoDevice: {}
+      ImageId: !Ref NATImageId
+      InstanceInitiatedShutdownBehavior: "stop"
+      InstanceType: !Ref InstanceTypeParameters
+      KeyName: !Ref SSHKeyPair
+      Monitoring: false
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          DeleteOnTermination: "true"
+          GroupSet:
+            - !GetAtt whirlpoolBastionNatSecGrpPubSub1.GroupId
+          SubnetId: !Ref whirlpoolPublicSubnet1
+      SourceDestCheck: false
+      Tags: 
+        - Key: Name
+          Value: whirlpool-bastion-node
+        - Key: Capacity
+          Value: 8GiB
+        - Key: ec2-purpose
+          Value: bastion-node
+        - Key: placement
+          Value: pubsub-1
+      Tenancy: "default"
+      # UserData: String; come back later
+
+  # --------- define crawler node 1 ------------
+  whirlpoolCrawlerNode:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      AvailabilityZone: "us-east-2a"
+      BlockDeviceMappings: 
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeType: "gp2"
+            DeleteOnTermination: "true"
+            VolumeSize: "8"
+          NoDevice: {}
+      ImageId: !Ref UbuntuImageId
+      InstanceInitiatedShutdownBehavior: "stop"
+      InstanceType: !Ref InstanceTypeParameters
+      KeyName: !Ref SSHKeyPair
+      Monitoring: false
+      PrivateIpAddress: "10.0.0.56"
+      SecurityGroupIds: 
+        - !GetAtt whirlpoolCrawlerSecGrpPvtSub4.GroupId
+      SourceDestCheck: true
+      SubnetId: !Ref whirlpoolPrivateSubnet4
+      Tags: 
+        - Key: Name
+          Value: whirlpool-crawler-node
+        - Key: Capacity
+          Value: 8GiB
+        - Key: ec2-purpose
+          Value: mercator crawler
+        - Key: placement
+          Value: pvtsub4
+      Tenancy: "default"
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #cloud-config
+            repo_update: true
+
+            packages:
+              - apt-transport-https
+              - ca-certificates
+              - curl
+              - software-properties-common
+              - gnupg
+              - netcat
+
+            runcmd:
+              - [ sh, -c, "export APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1"]
+              - [ sh, -c, 'curl -fsSL "https://download.docker.com/linux/ubuntu/gpg" | apt-key add -' ]
+              - [ sh, -c, "apt-key fingerprint F273FCD8" ]
+              - [ sh, -c, 'add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"' ]
+              - [ apt-get, update ]
+              - [ apt-get, install, -y, docker-ce ]
+              - [ sh, -c, "groupadd docker" ]
+              - [ sh, -c, "usermod -aG docker ubuntu" ]
+              - systemctl enable docker
+              - [ docker, network, create, whirlpool-net ]
+              - [ sh, -c, 'curl -L "https://github.com/docker/compose/releases/download/1.24.1/docker-compose-$(uname -s)-$(uname -m)" -o "/usr/local/bin/docker-compose"' ]
+              - [ chmod, +x, "/usr/local/bin/docker-compose" ]
+              - [ sh, -c, 'curl "https://www.postgresql.org/media/keys/ACCC4CF8.asc" | apt-key add -' ]
+              - [ sh, -c, 'echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list' ]
+              - [ apt-get, update ]
+              - [ apt-get, install, -y, --no-install-recommends, postgresql-client-11 ]
+              - [ rm, -rf, "/var/lib/apt/lists/*" ]
+              - [ sh, -c, "cd /root; touch .pgpass" ]
+              - pwd
+              - [ sh, -c, "chmod 0600 /root/.pgpass" ]
+              - [ sh, -c, 'echo "${RDSEndpoint}:5432:*:${RDSMasterUsernameParam}:${RDSMasterPWDParam}" > /root/.pgpass' ]
+              - [ sh, -c, 'export PGPASSFILE="/root/.pgpass"']
+              - [ sh, -c, 'while !(nc -z ${RDSEndpoint} 5432); do echo "sleeping"; sleep 3; done']
+              - [ psql, -h, "${RDSEndpoint}", -U, "${RDSMasterUsernameParam}", -c, "CREATE USER ${RDSWhirlpoolUserParam} WITH PASSWORD '${RDSWhirlpoolPWDParam}'" ]
+              - [ psql, -h, "${RDSEndpoint}", -U, "${RDSMasterUsernameParam}", -c, "GRANT ALL PRIVILEGES ON DATABASE ${RDSDBNameParam} TO ${RDSWhirlpoolUserParam}" ]
+            output: {all: '| tee -a /var/log/cloud-init-output.log'}
+
+
+  # --------- declare crawler node 2 later -----------------------
+
+  # -------------- define route table if everything above goes well -----------
+  # ------------- bastion route table on public subnet 1 ---------------
+  WhirlpoolBastionRTonPubSub1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: WhirlpoolVPCId
+      Tags:
+        - Key: Name
+          Value: whirlpool-bastion-routetable-on-pubsub-1
+
+  WhirlpoolBastionRoutePubSub1:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - whirlpoolIGW
+      - WhirlpoolGatewayAttachment
+    Properties:
+      RouteTableId: !Ref WhirlpoolBastionRTonPubSub1
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref whirlpoolIGW
+
+  WhirlpoolBastionSubnetRTAssociationPubSub1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref whirlpoolPublicSubnet1
+      RouteTableId: !Ref WhirlpoolBastionRTonPubSub1
+
+
+  # ---------------- mongodb route table on pvt subnet 2 --------------      
+  WhirlpoolMongoRTonPvtSub2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref WhirlpoolVPCId
+      Tags:
+        - Key: Name
+          Value: whirlpool-mongodb-routetable-on-pvtsub-2
+    
+  WhirlpoolMongoRoutePvtSub2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref WhirlpoolMongoRTonPvtSub2
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref whirlpoolBastionNode
+
+  WhirlpoolMongoSubnetRTAssociationPvtSub2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref whirlpoolPrivateSubnet2
+      RouteTableId: !Ref WhirlpoolMongoRTonPvtSub2
+
+  # ------------- crawler route tbale on pvt sub 4 ---------------
+  WhirlpoolCrawlerRTonPvtSub4:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref WhirlpoolVPCId
+      Tags:
+        - Key: Name
+          Value: whirlpool-crawler-route-table-on-pvtsub-4
+
+  WhirlpoolCrawlerRoutePvtSub4:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref WhirlpoolCrawlerRTonPvtSub4
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref whirlpoolBastionNode
+
+  WhirlpoolCrawlerSubnetRTAssociationPvtSub4:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref whirlpoolPrivateSubnet4
+      RouteTableId: !Ref WhirlpoolCrawlerRTonPvtSub4
+    
